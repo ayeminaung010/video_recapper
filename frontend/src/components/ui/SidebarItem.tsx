@@ -1,22 +1,23 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
 
 interface SidebarItemProps {
   icon: ReactNode;
   label: string;
   active: boolean;
-  onClick: () => void;
+  href: string;
 }
 
 export default function SidebarItem({
   icon,
   label,
   active,
-  onClick,
+  href,
 }: SidebarItemProps) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <Link
+      href={href}
+      aria-current={active ? "page" : undefined}
       className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl transition-all duration-200 ${
         active
           ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 font-bold"
@@ -25,6 +26,6 @@ export default function SidebarItem({
     >
       {icon}
       <span className="text-xs uppercase tracking-wider">{label}</span>
-    </button>
+    </Link>
   );
 }

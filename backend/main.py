@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from PIL import Image
 
 from backend.features.captioner import router as captioner_router
+from backend.features.downloader import router as downloader_router
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,13 +45,14 @@ app = FastAPI(title="Movie Recap Backend", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(captioner_router)
+app.include_router(downloader_router)
 
 
 class AspectRatio(str, Enum):

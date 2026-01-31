@@ -22,6 +22,7 @@ from PIL import Image
 
 from backend.features.captioner import router as captioner_router
 from backend.features.downloader import router as downloader_router
+from backend.features.srt_finder import router as srt_finder_router
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,6 +54,7 @@ app.add_middleware(
 
 app.include_router(captioner_router)
 app.include_router(downloader_router)
+app.include_router(srt_finder_router)
 
 
 class AspectRatio(str, Enum):

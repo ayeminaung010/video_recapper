@@ -29,6 +29,10 @@ except Exception:
     torch = None
 
 logger = logging.getLogger("movie-recap")
+
+# Work around duplicate OpenMP runtime on Windows (faster-whisper + torch).
+# This avoids libiomp5md.dll initialization errors; keep an eye on stability.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 router = APIRouter(prefix="/captioner", tags=["captioner"])
 
 CAPTION_TEMP_DIR = Path(tempfile.gettempdir()) / "video_recap_captioner"
@@ -59,7 +63,14 @@ class CaptionUploadResponse(BaseModel):
 
 class CaptionTranscribeRequest(BaseModel):
     video_id: str
-    model: str = Field("medium", pattern="^(small|medium)$")
+    model: str = Field("large-v3", pattern="^(small|medium|large-v2|large-v3)$")
+    language: str | None = Field(
+        "auto", description="Source language hint (e.g., en, my). Use 'auto' to detect."
+    )
+    target_language: str | None = Field(
+        "auto",
+        description="Desired output language. 'en' triggers Whisper translate; others use transcribe.",
+    )
 
 
 class CaptionTranscribeResponse(BaseModel):
@@ -104,6 +115,12 @@ class CaptionJobStatusResponse(BaseModel):
 class SrtExportRequest(BaseModel):
     captions: list[CaptionEntry]
     file_name: Optional[str] = None
+    language: Optional[str] = Field(
+        None, description="Source language used for the captions (optional)."
+    )
+    target_language: Optional[str] = Field(
+        None, description="Language used for the exported SRT (optional)."
+    )
 
 
 def resolve_caption_video(video_id: str) -> Path:
@@ -128,7 +145,8 @@ def load_whisper_model(model_size: str) -> "WhisperModel":
             detail="faster-whisper is not installed. Please install it.",
         )
     device = get_whisper_device()
-    compute_type = "float16" if device == "cuda" else "int8"
+    # CPU int8 can degrade transcription quality for Burmese; prefer float32.
+    compute_type = "float16" if device == "cuda" else "float32"
     cache_key = f"{model_size}:{device}:{compute_type}"
     if cache_key not in whisper_model_cache:
         logger.info(
@@ -323,7 +341,7 @@ def build_srt(captions: list[CaptionEntry]) -> str:
         lines.append(
             f"{format_srt_timestamp(caption.start)} --> {format_srt_timestamp(caption.end)}"
         )
-        lines.append(caption.text)
+        lines.append(unicodedata.normalize("NFC", caption.text))
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
@@ -463,7 +481,7 @@ def caption_transcribe(payload: CaptionTranscribeRequest):
     video_path = resolve_caption_video(payload.video_id)
 
     try:
-        target_model = "medium" if payload.model == "medium" else "small"
+        target_model = payload.model
         model = load_whisper_model(target_model)
     except HTTPException:
         raise
@@ -471,19 +489,41 @@ def caption_transcribe(payload: CaptionTranscribeRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     device = get_whisper_device()
+    language_hint = None if payload.language in (None, "", "auto") else payload.language
+    target_lang = None if payload.target_language in (None, "", "auto") else payload.target_language
+    task = "translate" if target_lang == "en" else "transcribe"
+
+    initial_prompt = (
+        "မြန်မာစကားပြောကို မြန်မာစာသားအဖြစ် ပြန်ဆိုပေးပါ။"
+        if language_hint == "my"
+        else None
+    )
+
     logger.info(
-        "Transcribing %s with Whisper %s on %s",
+        "Transcribing %s with Whisper %s on %s | lang=%s | target=%s | task=%s",
         video_path.name,
         payload.model,
         device,
+        language_hint or "auto",
+        target_lang or "transcribe",
+        task,
     )
     try:
+        # Burmese-optimized transcription settings
         segments_iter, info = model.transcribe(
             str(video_path),
-            language="my",
-            task="transcribe",
-            initial_prompt="မြန်မာစကားပြောကို မြန်မာစာသားအဖြစ် ပြန်ဆိုပေးပါ။",
+            language=language_hint,
+            task=task,
+            initial_prompt=initial_prompt,
+            beam_size=5,
+            best_of=5,
+            patience=1.0,
+            word_timestamps=True,
             vad_filter=True,
+            vad_parameters=dict(
+                min_silence_duration_ms=500,
+                speech_pad_ms=400,
+            ),
         )
     except MemoryError as exc:
         logger.exception("Transcription failed with memory error")
@@ -494,18 +534,18 @@ def caption_transcribe(payload: CaptionTranscribeRequest):
 
     detected_language = getattr(info, "language", None)
     language_prob = getattr(info, "language_probability", None)
-    if detected_language and detected_language != "my":
-        logger.warning("Detected language is %s (expected my)", detected_language)
+    if detected_language and language_hint and detected_language != language_hint:
+        logger.warning("Detected language %s differs from hint %s", detected_language, language_hint)
     if language_prob is not None:
         logger.info("Language probability: %s", language_prob)
 
     segments = list(segments_iter)
-    if not segments:
+    if not segments and language_hint:
         logger.warning("No segments returned. Retrying without language hint...")
         try:
             retry_iter, retry_info = model.transcribe(
                 str(video_path),
-                task="transcribe",
+                task=task,
                 vad_filter=True,
             )
         except MemoryError as exc:
@@ -533,11 +573,10 @@ def caption_transcribe(payload: CaptionTranscribeRequest):
         preview = " | ".join(c.text[:60] for c in captions[:3])
         logger.info("Caption preview: %s", preview)
     filtered = filter_myanmar_captions(captions, threshold=0.1)
-    if filtered:
+    if filtered and (language_hint in (None, "my", "auto")):
         captions = filtered
         logger.info("Transcription completed: %s raw, %s kept", raw_count, len(captions))
     else:
-        logger.warning("Myanmar filter removed all segments; returning raw output")
         logger.info("Transcription completed: %s raw", raw_count)
 
     return CaptionTranscribeResponse(
@@ -546,16 +585,40 @@ def caption_transcribe(payload: CaptionTranscribeRequest):
 
 
 def transcribe_with_progress(
-    job_id: str, video_path: Path, model_name: str, device: str
+    job_id: str,
+    video_path: Path,
+    model_name: str,
+    device: str,
+    language: str | None,
+    target_language: str | None,
 ) -> None:
     try:
         model = load_whisper_model(model_name)
+        language_hint = None if language in (None, "", "auto") else language
+        target_lang = None if target_language in (None, "", "auto") else target_language
+        task = "translate" if target_lang == "en" else "transcribe"
+
+        initial_prompt = (
+            "မြန်မာစကားပြောကို မြန်မာစာသားအဖြစ် ပြန်ဆိုပေးပါ။"
+            if language_hint == "my"
+            else None
+        )
+
+        # Burmese-optimized transcription settings
         segments_iter, info = model.transcribe(
             str(video_path),
-            language="my",
-            task="transcribe",
-            initial_prompt="မြန်မာစကားပြောကို မြန်မာစာသားအဖြစ် ပြန်ဆိုပေးပါ။",
+            language=language_hint,
+            task=task,
+            initial_prompt=initial_prompt,
+            beam_size=5,
+            best_of=5,
+            patience=1.0,
+            word_timestamps=True,
             vad_filter=True,
+            vad_parameters=dict(
+                min_silence_duration_ms=500,
+                speech_pad_ms=400,
+            ),
         )
 
         duration = getattr(info, "duration", None)
@@ -585,11 +648,10 @@ def transcribe_with_progress(
 
         raw_count = len(captions)
         filtered = filter_myanmar_captions(captions, threshold=0.1)
-        if filtered:
+        if filtered and (language_hint in (None, "my", "auto")):
             captions = filtered
             logger.info("Transcription completed: %s raw, %s kept", raw_count, len(captions))
         else:
-            logger.warning("Myanmar filter removed all segments; returning raw output")
             logger.info("Transcription completed: %s raw", raw_count)
 
         transcribe_job_store[job_id]["status"] = "completed"
@@ -611,7 +673,7 @@ def transcribe_with_progress(
 def caption_transcribe_async(payload: CaptionTranscribeRequest):
     video_path = resolve_caption_video(payload.video_id)
     device = get_whisper_device()
-    target_model = "medium" if payload.model == "medium" else "small"
+    target_model = payload.model
 
     job_id = uuid4().hex
     transcribe_job_store[job_id] = {
@@ -623,7 +685,7 @@ def caption_transcribe_async(payload: CaptionTranscribeRequest):
 
     thread = threading.Thread(
         target=transcribe_with_progress,
-        args=(job_id, video_path, target_model, device),
+        args=(job_id, video_path, target_model, device, payload.language, payload.target_language),
         daemon=True,
     )
     thread.start()
@@ -709,6 +771,10 @@ def export_srt(payload: SrtExportRequest):
     content = build_srt(payload.captions)
     filename = payload.file_name or "transcript.srt"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    return PlainTextResponse(content, headers=headers, media_type="text/plain")
+    return PlainTextResponse(
+        content,
+        headers=headers,
+        media_type="text/plain; charset=utf-8",
+    )
 
 

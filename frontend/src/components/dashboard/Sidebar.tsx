@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, FileText, Mic, Video } from "lucide-react";
+import { Download, FileSearch, FileText, Mic, Video } from "lucide-react";
 import { usePathname } from "next/navigation";
 
 import SidebarItem from "@/components/ui/SidebarItem";
@@ -16,6 +16,11 @@ const NAV_ITEMS: Array<{
     href: "/paths/captioner",
     label: "AUTO CAPTIONER",
     icon: <FileText size={20} />,
+  },
+  {
+    href: "/paths/srt-finder",
+    label: "SRT FINDER",
+    icon: <FileSearch size={20} />,
   },
   {
     href: "/paths/video-downloader",

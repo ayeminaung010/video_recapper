@@ -1,0 +1,14 @@
+"use client";
+
+import SrtFinderSection from "@/components/sections/SrtFinderSection";
+
+export default function SrtFinderPage() {
+  const apiBaseUrl =
+    process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+
+  return (
+    <div className="max-w-6xl mx-auto">
+      <SrtFinderSection apiBaseUrl={apiBaseUrl} />
+    </div>
+  );
+}

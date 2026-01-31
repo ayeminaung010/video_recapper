@@ -1,0 +1,30 @@
+__pycache__/
+
+features/__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+.env
+.venv/
+venv/
+.env.*
+*.sqlite3
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Media outputs
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.wav
+*.mp3
+*.webm
+*.png
+*.jpg
+*.jpeg
+
+# temp
+/tmp/
